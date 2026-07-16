@@ -18,7 +18,10 @@ export class Did {
   @PrimaryGeneratedColumn('uuid')
   id: string;
 
-  @ApiProperty({ description: 'Stellar address (G... public key)', example: 'GABC123...' })
+  @ApiProperty({
+    description: 'Stellar address (G... public key)',
+    example: 'GABC123...',
+  })
   @Column({ unique: true, nullable: false })
   address: string;
 
@@ -26,7 +29,9 @@ export class Did {
   @Column({ nullable: false })
   owner: string;
 
-  @ApiProperty({ description: 'Whether this DID has been verified by an issuer' })
+  @ApiProperty({
+    description: 'Whether this DID has been verified by an issuer',
+  })
   @Column({ name: 'is_verified', default: false })
   isVerified: boolean;
 

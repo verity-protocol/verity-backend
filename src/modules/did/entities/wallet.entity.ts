@@ -26,7 +26,9 @@ export class Wallet {
   @JoinColumn({ name: 'did_id' })
   did: Did;
 
-  @ApiProperty({ description: 'Whether this is the primary wallet for the DID' })
+  @ApiProperty({
+    description: 'Whether this is the primary wallet for the DID',
+  })
   @Column({ name: 'is_primary', default: false })
   isPrimary: boolean;
 
