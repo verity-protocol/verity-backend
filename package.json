@@ -4,6 +4,7 @@
   "description": "Backend API and Horizon integration for Verity — self-sovereign identity on Stellar",
   "private": true,
   "license": "MIT",
+  "packageManager": "pnpm@9.15.0",
   "scripts": {
     "build": "nest build",
     "start": "nest start",

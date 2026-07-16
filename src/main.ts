@@ -34,7 +34,9 @@ async function bootstrap() {
 
   const config = new DocumentBuilder()
     .setTitle('Verity API')
-    .setDescription('Self-sovereign identity API for Stellar — prove who you are, reveal nothing')
+    .setDescription(
+      'Self-sovereign identity API for Stellar — prove who you are, reveal nothing',
+    )
     .setVersion('0.1.0')
     .addTag('did', 'Decentralized Identifier management')
     .addTag('credentials', 'Verifiable credential lifecycle')
