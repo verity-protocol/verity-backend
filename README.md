@@ -182,20 +182,31 @@ pnpm run test:cov   # Coverage report
 ## Project Structure
 
 ```
-src/
-├── main.ts                    # Bootstrap, global pipes/filters
-├── app.module.ts              # Root module
-├── config/                    # Environment validation, configuration
-├── database/                  # TypeORM config, migrations
-├── common/                    # Shared filters, interceptors, decorators
-└── modules/
-    ├── did/                   # DID management (FULL implementation)
-    ├── credential/            # Credential lifecycle (stubs)
-    ├── auth/                  # OAuth popup flow (stubs)
-    ├── kyc/                   # KYC verification (stubs)
-    ├── stellar/               # Stellar SDK integration (stubs)
-    ├── issuer/                # KYC provider registry (stubs)
-    └── indexer/               # Horizon event indexing (stubs)
+verity-backend/
+├── src/
+│   ├── main.ts                  # Bootstrap, global pipes/filters, Swagger setup
+│   ├── app.module.ts            # Root module
+│   ├── app.controller.ts        # Health check endpoint
+│   ├── common/
+│   │   ├── constants/           # Shared constants
+│   │   ├── decorators/          # Custom decorators (@Public)
+│   │   ├── filters/             # Exception filters
+│   │   └── interceptors/        # Response transformation
+│   ├── config/                  # Environment validation, configuration
+│   ├── database/                # TypeORM config, migrations
+│   └── modules/
+│       ├── did/                 # DID management (reference implementation)
+│       ├── credential/          # Credential lifecycle (stubs)
+│       ├── auth/                # OAuth popup flow (stubs)
+│       ├── kyc/                 # KYC verification (stubs)
+│       ├── stellar/             # Stellar SDK integration (stubs)
+│       ├── issuer/              # KYC provider registry (stubs)
+│       └── indexer/             # Horizon event indexing (stubs)
+├── test/                        # E2E tests
+├── Dockerfile                   # Multi-stage Docker build
+├── docker-compose.yml           # Local dev with PostgreSQL 16
+├── .github/                     # CI, issue templates, PR template
+└── package.json                 # pnpm, NestJS 11, TypeORM
 ```
 
 ## Contributing
@@ -204,4 +215,4 @@ See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
-Apache License 2.0 — see [LICENSE](LICENSE).
+MIT License — see [LICENSE](LICENSE).

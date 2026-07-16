@@ -8,6 +8,7 @@ import {
   Param,
   Logger,
 } from '@nestjs/common';
+import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { DidService } from './did.service';
 
 /**
@@ -20,6 +21,7 @@ import { DidService } from './did.service';
  *
  * This is the core module — all other modules depend on it.
  */
+@ApiTags('did')
 @Controller('did')
 export class DidController {
   private readonly logger = new Logger(DidController.name);
@@ -39,6 +41,9 @@ export class DidController {
    * - Return the DID document
    */
   @Post()
+  @ApiOperation({ summary: 'Create a new DID' })
+  @ApiResponse({ status: 201, description: 'DID created successfully' })
+  @ApiResponse({ status: 400, description: 'Invalid wallet address' })
   async createDid(
     @Body() _body: { ownerAddress: string; nullifierHash?: string },
   ) {
@@ -59,6 +64,9 @@ export class DidController {
    * 4. Returns formatted DID resolution document
    */
   @Get(':identifier')
+  @ApiOperation({ summary: 'Resolve a DID to its verification document' })
+  @ApiResponse({ status: 200, description: 'DID resolution document returned' })
+  @ApiResponse({ status: 404, description: 'DID not found' })
   async resolveDid(@Param('identifier') identifier: string) {
     return this.didService.resolve(identifier);
   }
@@ -71,6 +79,9 @@ export class DidController {
    * - Return all linked wallets with isPrimary flag
    */
   @Get(':identifier/wallets')
+  @ApiOperation({ summary: 'List wallets linked to a DID' })
+  @ApiResponse({ status: 200, description: 'List of linked wallets' })
+  @ApiResponse({ status: 404, description: 'DID not found' })
   async listWallets(@Param('identifier') _identifier: string) {
     this.logger.warn('listWallets not yet implemented');
     return { message: 'TODO: List wallets — see did.service.ts' };
@@ -87,6 +98,10 @@ export class DidController {
    * - Store Wallet record in database
    */
   @Post(':identifier/wallets')
+  @ApiOperation({ summary: 'Link a wallet to a DID' })
+  @ApiResponse({ status: 201, description: 'Wallet linked successfully' })
+  @ApiResponse({ status: 400, description: 'Invalid wallet address' })
+  @ApiResponse({ status: 404, description: 'DID not found' })
   async linkWallet(
     @Param('identifier') _identifier: string,
     @Body() _body: { walletAddress: string },
@@ -105,6 +120,10 @@ export class DidController {
    * - Delete Wallet record from database
    */
   @Delete(':identifier/wallets/:address')
+  @ApiOperation({ summary: 'Remove a wallet from a DID' })
+  @ApiResponse({ status: 200, description: 'Wallet removed successfully' })
+  @ApiResponse({ status: 400, description: 'Cannot remove last wallet' })
+  @ApiResponse({ status: 404, description: 'DID or wallet not found' })
   async unlinkWallet(
     @Param('identifier') _identifier: string,
     @Param('address') _address: string,
@@ -122,6 +141,9 @@ export class DidController {
    * - Update on-chain verification status via StellarService
    */
   @Patch(':identifier/verification')
+  @ApiOperation({ summary: 'Set verification status of a DID (admin-only)' })
+  @ApiResponse({ status: 200, description: 'Verification status updated' })
+  @ApiResponse({ status: 404, description: 'DID not found' })
   async setVerification(
     @Param('identifier') _identifier: string,
     @Body() _body: { isVerified: boolean },
