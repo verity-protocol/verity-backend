@@ -16,6 +16,8 @@
     "test:watch": "jest --watch",
     "test:cov": "jest --coverage",
     "test:e2e": "jest --config ./test/jest-e2e.json",
+    "e2e:local:setup": "bash scripts/e2e-local-setup.sh",
+    "test:e2e:local": "set -a; test -f test/e2e-local/.e2e-local.env && . test/e2e-local/.e2e-local.env; set +a; E2E_LOCAL=1 jest --config ./test/jest-e2e-local.json",
     "typeorm": "typeorm-ts-node-commonjs -d src/database/data-source.ts",
     "migration:generate": "npm run build && npm run typeorm -- migration:generate src/database/migrations/$npm_config_name",
     "migration:run": "npm run typeorm -- migration:run",
