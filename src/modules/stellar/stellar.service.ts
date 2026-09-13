@@ -10,8 +10,18 @@ import {
   nativeToScVal,
   rpc as SorobanRpc,
   scValToNative,
+  xdr,
 } from '@stellar/stellar-sdk';
 import type { Keypair, Transaction } from '@stellar/stellar-sdk';
+import { DidSubmissionContentionError } from './stellar-errors';
+import { SubmitQueue } from './submit-queue';
+
+export interface SubmitContractTransactionInput {
+  transaction: Transaction;
+  sourceAddress: string;
+  signers: Keypair[];
+  isValidBeforeSubmit?: () => Promise<void>;
+}
 
 @Injectable()
 export class StellarService {
@@ -24,8 +34,13 @@ export class StellarService {
 
   private static readonly MAX_POLL_ATTEMPTS = 30;
   private static readonly POLL_INTERVAL_MS = 1000;
+  private static readonly MAX_SUBMIT_RETRIES = 3;
+  private static readonly SUBMIT_RETRY_BACKOFF_MS = 50;
 
-  constructor(private readonly configService: ConfigService) {
+  constructor(
+    private readonly configService: ConfigService,
+    private readonly submitQueue: SubmitQueue,
+  ) {
     this.horizonUrl =
       this.configService.get<string>('app.stellar.horizonUrl') || '';
     this.rpcUrl = this.configService.get<string>('app.stellar.rpcUrl') || '';
@@ -143,6 +158,135 @@ export class StellarService {
     }
 
     throw new Error(`Timed out waiting for transaction ${response.hash}`);
+  }
+
+  async submitContractTransaction(
+    input: SubmitContractTransactionInput,
+  ): Promise<unknown> {
+    return this.submitQueue.enqueue(input.sourceAddress, () =>
+      this.submitWithContentionRetry(input),
+    );
+  }
+
+  private async submitWithContentionRetry(
+    input: SubmitContractTransactionInput,
+  ): Promise<unknown> {
+    for (
+      let attempt = 0;
+      attempt < StellarService.MAX_SUBMIT_RETRIES;
+      attempt += 1
+    ) {
+      if (input.isValidBeforeSubmit) {
+        await input.isValidBeforeSubmit();
+      }
+
+      const account = await this.getSourceAccount(input.sourceAddress);
+      const rebuilt = this.rebuildWithFreshSource(input.transaction, account);
+      const prepared = await this.rpcServer.prepareTransaction(rebuilt);
+      for (const signer of input.signers) {
+        prepared.sign(signer);
+      }
+
+      const response = await this.rpcServer.sendTransaction(prepared);
+      if (response.status === 'ERROR') {
+        if (StellarService.isBadSeqResponse(response)) {
+          this.logger.warn(
+            `Submission for ${input.sourceAddress} collided on attempt ${attempt + 1}; rebuilding`,
+          );
+          await this.sleep(StellarService.SUBMIT_RETRY_BACKOFF_MS);
+          continue;
+        }
+        throw new Error(`Transaction ${response.hash} rejected by the network`);
+      }
+
+      const finalStatus = await this.pollTransaction(response.hash);
+      if (finalStatus.status === SorobanRpc.Api.GetTransactionStatus.FAILED) {
+        if (
+          StellarService.isBadSeqResult(
+            (finalStatus as SorobanRpc.Api.GetFailedTransactionResponse)
+              .resultXdr,
+          )
+        ) {
+          this.logger.warn(
+            `Submission for ${input.sourceAddress} collided on chain on attempt ${attempt + 1}; rebuilding`,
+          );
+          await this.sleep(StellarService.SUBMIT_RETRY_BACKOFF_MS);
+          continue;
+        }
+        throw new Error(`Transaction ${response.hash} failed on chain`);
+      }
+      return finalStatus;
+    }
+
+    throw new DidSubmissionContentionError();
+  }
+
+  private async pollTransaction(
+    hash: string,
+  ): Promise<SorobanRpc.Api.GetTransactionResponse> {
+    for (
+      let attempt = 0;
+      attempt < StellarService.MAX_POLL_ATTEMPTS;
+      attempt += 1
+    ) {
+      const status = await this.rpcServer.getTransaction(hash);
+      if (
+        status.status === SorobanRpc.Api.GetTransactionStatus.SUCCESS ||
+        status.status === SorobanRpc.Api.GetTransactionStatus.FAILED
+      ) {
+        return status;
+      }
+      await this.sleep(StellarService.POLL_INTERVAL_MS);
+    }
+    throw new Error(`Timed out waiting for transaction ${hash}`);
+  }
+
+  private rebuildWithFreshSource(
+    transaction: Transaction,
+    account: Account,
+  ): Transaction {
+    const [operation] = transaction.operations;
+    if (!operation || operation.type !== 'invokeHostFunction') {
+      throw new Error(
+        'rebuildWithFreshSource requires a single invokeHostFunction operation',
+      );
+    }
+    const rebuilt = new TransactionBuilder(account, {
+      fee: transaction.fee,
+      networkPassphrase: this.passphrase || Networks.TESTNET,
+    })
+      .addOperation(
+        Operation.invokeHostFunction({
+          source: operation.source,
+          func: operation.func,
+          auth: operation.auth,
+        }),
+      )
+      .setTimeout(0);
+    return rebuilt.build();
+  }
+
+  private static isBadSeqResponse(
+    response: SorobanRpc.Api.SendTransactionResponse,
+  ): boolean {
+    if (response.status !== 'ERROR') {
+      return false;
+    }
+    return StellarService.isBadSeqResult(response.errorResult);
+  }
+
+  private static isBadSeqResult(resultXdr?: xdr.TransactionResult): boolean {
+    if (!resultXdr) {
+      return false;
+    }
+    try {
+      return (
+        resultXdr.result().switch().value ===
+        xdr.TransactionResultCode.txBadSeq().value
+      );
+    } catch {
+      return false;
+    }
   }
 
   /**
