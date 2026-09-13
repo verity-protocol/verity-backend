@@ -1,5 +1,7 @@
-import { Controller, Post, Get, Body, Param, Logger } from '@nestjs/common';
+import { Body, Controller, Get, Param, Post } from '@nestjs/common';
+import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { CredentialService } from './credential.service';
+import { IssueCredentialDto, RevokeCredentialDto } from './dto/credential.dto';
 
 /**
  * Credential API — manages verified credential lifecycle.
@@ -8,87 +10,77 @@ import { CredentialService } from './credential.service';
  * off-chain document verification. Only the credential hash is stored
  * on-chain and in this database — never the raw document.
  *
+ * Issuance is single-step and signed by the backend's issuer key
+ * (STELLAR_ISSUER_SECRET), whose public key must be an approved issuer in
+ * the issuer_registry contract.
+ *
  * Endpoints:
  * - POST /credentials — Issue a new credential (issuer only)
  * - GET /credentials/:did — List all credentials for a DID
  * - GET /credentials/:did/:type — Get specific credential
- * - POST /credentials/:did/:type/revoke — Revoke a credential
+ * - POST /credentials/:did/:type/revoke — Revoke a credential (issuer only)
  */
+@ApiTags('credentials')
 @Controller('credentials')
 export class CredentialController {
-  private readonly logger = new Logger(CredentialController.name);
-
   constructor(private readonly credentialService: CredentialService) {}
 
-  /**
-   * Issue a credential to a DID.
-   *
-   * TODO: Implement
-   * - Validate issuer is registered and active
-   * - Check credential doesn't already exist for this DID + type
-   * - Store credential in database
-   * - Write credential hash to Stellar credential contract via StellarService
-   * - Return the issued credential
-   */
   @Post()
-  async issueCredential(
-    @Body()
-    _body: {
-      didAddress: string;
-      issuerAddress: string;
-      credentialType: string;
-      credentialHash: string;
-    },
-  ) {
-    this.logger.warn('issueCredential not yet implemented');
-    return { message: 'TODO: Issue credential — see credential.service.ts' };
+  @ApiOperation({ summary: 'Issue a credential to a DID (issuer-signed)' })
+  @ApiResponse({ status: 201, description: 'Credential issued successfully' })
+  @ApiResponse({ status: 400, description: 'Invalid credential type or hash' })
+  @ApiResponse({ status: 403, description: 'Issuer not approved' })
+  @ApiResponse({ status: 404, description: 'DID not found' })
+  @ApiResponse({
+    status: 409,
+    description: 'Credential of this type already exists',
+  })
+  @ApiResponse({ status: 422, description: 'Invalid DID identifier format' })
+  async issueCredential(@Body() body: IssueCredentialDto) {
+    return this.credentialService.issue(body);
   }
 
-  /**
-   * List all credentials for a DID.
-   *
-   * TODO: Implement
-   * - Look up DID by address
-   * - Query all credentials for that DID
-   * - Include issuer info
-   */
   @Get(':did')
-  async listCredentials(@Param('did') _didAddress: string) {
-    this.logger.warn('listCredentials not yet implemented');
-    return { message: 'TODO: List credentials — see credential.service.ts' };
+  @ApiOperation({ summary: 'List all credentials for a DID' })
+  @ApiResponse({
+    status: 200,
+    description: 'List of credentials with issuer info',
+  })
+  @ApiResponse({ status: 404, description: 'DID not found' })
+  @ApiResponse({ status: 422, description: 'Invalid DID identifier format' })
+  async listCredentials(@Param('did') did: string) {
+    return this.credentialService.listByDid(did);
   }
 
-  /**
-   * Get a specific credential for a DID.
-   *
-   * TODO: Implement
-   * - Query credential by DID + type
-   * - Return 404 if not found
-   */
   @Get(':did/:type')
-  async getCredential(
-    @Param('did') _didAddress: string,
-    @Param('type') _credentialType: string,
-  ) {
-    this.logger.warn('getCredential not yet implemented');
-    return { message: 'TODO: Get credential — see credential.service.ts' };
+  @ApiOperation({ summary: 'Get a specific credential for a DID' })
+  @ApiResponse({ status: 200, description: 'Credential returned' })
+  @ApiResponse({ status: 404, description: 'DID or credential not found' })
+  @ApiResponse({ status: 422, description: 'Invalid DID identifier format' })
+  async getCredential(@Param('did') did: string, @Param('type') type: string) {
+    return this.credentialService.getByDidAndType(did, type);
   }
 
-  /**
-   * Revoke a credential.
-   *
-   * TODO: Implement
-   * - Validate issuer is the original issuer
-   * - Set isRevoked = true, set revokedAt = now
-   * - Update on-chain credential contract via StellarService
-   */
   @Post(':did/:type/revoke')
+  @ApiOperation({ summary: 'Revoke a credential (original issuer only)' })
+  @ApiResponse({ status: 201, description: 'Credential revoked' })
+  @ApiResponse({ status: 400, description: 'Invalid issuer address' })
+  @ApiResponse({
+    status: 403,
+    description: 'Only the original issuer can revoke',
+  })
+  @ApiResponse({ status: 404, description: 'DID or credential not found' })
+  @ApiResponse({ status: 409, description: 'Credential already revoked' })
+  @ApiResponse({ status: 422, description: 'Invalid DID identifier format' })
   async revokeCredential(
-    @Param('did') _didAddress: string,
-    @Param('type') _credentialType: string,
-    @Body() _body: { issuerAddress: string },
+    @Param('did') did: string,
+    @Param('type') type: string,
+    @Body() body: RevokeCredentialDto,
   ) {
-    this.logger.warn('revokeCredential not yet implemented');
-    return { message: 'TODO: Revoke credential — see credential.service.ts' };
+    return this.credentialService.revoke({
+      did,
+      credentialType: type,
+      issuerAddress: body.issuerAddress,
+    });
   }
 }

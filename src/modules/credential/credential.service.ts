@@ -1,86 +1,246 @@
-import { Injectable, Logger, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ConflictException,
+  ForbiddenException,
+  Injectable,
+  Logger,
+  NotFoundException,
+  ServiceUnavailableException,
+} from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
+import { Address } from '@stellar/stellar-sdk';
+import { StellarService } from '../stellar/stellar.service';
+import { SigningKeysService } from '../stellar/signing-keys.service';
 import { Credential } from './entities/credential.entity';
+import { Did } from '../did/entities/did.entity';
+import { Issuer } from '../issuer/entities/issuer.entity';
+import {
+  isValidStellarAddress,
+  normalizeDidIdentifier,
+  toCanonicalDid,
+} from '../did/did-identifier';
+
+export interface IssueCredentialInput {
+  did: string;
+  credentialType: string;
+  credentialHash: string;
+}
+
+export interface RevokeCredentialInput {
+  did: string;
+  credentialType: string;
+  issuerAddress: string;
+}
+
+const CREDENTIAL_TYPE_PATTERN = /^[a-zA-Z0-9_]+$/;
+const SHA256_HEX_PATTERN = /^[0-9a-f]{64}$/;
 
 @Injectable()
 export class CredentialService {
   private readonly logger = new Logger(CredentialService.name);
 
   constructor(
+    private readonly configService: ConfigService,
+    private readonly stellarService: StellarService,
+    private readonly signingKeys: SigningKeysService,
     @InjectRepository(Credential)
     private readonly credentialRepository: Repository<Credential>,
+    @InjectRepository(Did)
+    private readonly didRepository: Repository<Did>,
+    @InjectRepository(Issuer)
+    private readonly issuerRepository: Repository<Issuer>,
   ) {}
 
-  /**
-   * Issue a new credential.
-   *
-   * TODO: Implement full flow:
-   * 1. Validate issuer exists and is active in the Issuer registry
-   * 2. Check no credential of this type already exists for this DID
-   * 3. Create and save Credential record in database
-   * 4. Call StellarService.queryContract() to verify the DID exists on-chain
-   * 5. Call StellarService.submitTransaction() to write credential hash to
-   *    the Stellar credential contract (via the backend's signing key)
-   * 6. Return the issued credential
-   *
-   * IMPORTANT: The raw document is NEVER stored. Only the pre-computed
-   * credentialHash (SHA-256 of the verified credential data) is stored.
-   */
-  async issue(
-    _didAddress: string,
-    _issuerAddress: string,
-    _credentialType: string,
-    _credentialHash: string,
-  ): Promise<Credential> {
-    this.logger.warn('CredentialService.issue not yet implemented');
-    throw new Error('Not implemented');
+  async issue(input: IssueCredentialInput): Promise<Credential> {
+    const didHex = normalizeDidIdentifier(input.did);
+    this.requireCredentialType(input.credentialType);
+    this.requireCredentialHash(input.credentialHash);
+
+    const issuer = this.signingKeys.getIssuerKeypair();
+    const contractId = this.contractId();
+
+    const didEntity = await this.didRepository.findOne({
+      where: { address: didHex },
+    });
+    if (!didEntity) {
+      throw new NotFoundException(`DID not found: ${toCanonicalDid(didHex)}`);
+    }
+
+    const issuerEntity = await this.issuerRepository.findOne({
+      where: { address: issuer.publicKey() },
+    });
+    if (!issuerEntity || !issuerEntity.isActive) {
+      throw new ForbiddenException(
+        `Issuer is not approved: ${issuer.publicKey()}`,
+      );
+    }
+
+    const existing = await this.credentialRepository.findOne({
+      where: { didId: didEntity.id, credentialType: input.credentialType },
+    });
+    if (existing) {
+      throw new ConflictException(
+        `A ${input.credentialType} credential already exists for ${toCanonicalDid(didHex)}`,
+      );
+    }
+
+    const prepared = await this.stellarService.prepareContractCall({
+      sourceAddress: issuer.publicKey(),
+      contractId,
+      method: 'issue_credential',
+      args: [
+        new Address(issuer.publicKey()),
+        Buffer.from(didHex, 'hex'),
+        input.credentialType,
+        Buffer.from(input.credentialHash, 'hex'),
+      ],
+    });
+    await this.stellarService.submitContractTransaction({
+      transaction: prepared.transaction,
+      signers: [issuer],
+      sourceAddress: issuer.publicKey(),
+    });
+
+    const credential = await this.credentialRepository.save(
+      this.credentialRepository.create({
+        didId: didEntity.id,
+        issuerId: issuerEntity.id,
+        credentialType: input.credentialType,
+        credentialHash: input.credentialHash,
+      }),
+    );
+    return credential;
   }
 
-  /**
-   * List all credentials for a DID address.
-   *
-   * TODO: Implement:
-   * 1. Look up the DID by address
-   * 2. Query all credentials with issuer relation loaded
-   * 3. Return sorted by issuedAt descending
-   */
-  async listByDid(_didAddress: string): Promise<Credential[]> {
-    this.logger.warn('CredentialService.listByDid not yet implemented');
-    throw new Error('Not implemented');
+  async listByDid(did: string): Promise<Credential[]> {
+    const didEntity = await this.requireDid(did);
+    return this.credentialRepository.find({
+      where: { didId: didEntity.id },
+      relations: ['issuer'],
+      order: { issuedAt: 'DESC' },
+    });
   }
 
-  /**
-   * Get a specific credential by DID address and credential type.
-   *
-   * TODO: Implement:
-   * 1. Query credential by DID + type
-   * 2. Throw NotFoundException if not found
-   */
   async getByDidAndType(
-    _didAddress: string,
-    _credentialType: string,
+    did: string,
+    credentialType: string,
   ): Promise<Credential> {
-    this.logger.warn('CredentialService.getByDidAndType not yet implemented');
-    throw new NotFoundException('Credential not found');
+    const didEntity = await this.requireDid(did);
+    this.requireCredentialType(credentialType);
+    const credential = await this.credentialRepository.findOne({
+      where: { didId: didEntity.id, credentialType },
+      relations: ['issuer'],
+    });
+    if (!credential) {
+      throw new NotFoundException(
+        `Credential not found: ${toCanonicalDid(didEntity.address)} type ${credentialType}`,
+      );
+    }
+    return credential;
   }
 
-  /**
-   * Revoke a credential.
-   *
-   * TODO: Implement:
-   * 1. Load credential by DID + type
-   * 2. Validate the revoker is the original issuer
-   * 3. Set isRevoked = true, revokedAt = new Date()
-   * 4. Save to database
-   * 5. Call StellarService to update on-chain revocation status
-   */
-  async revoke(
-    _didAddress: string,
-    _credentialType: string,
-    _issuerAddress: string,
-  ): Promise<Credential> {
-    this.logger.warn('CredentialService.revoke not yet implemented');
-    throw new Error('Not implemented');
+  async revoke(input: RevokeCredentialInput): Promise<Credential> {
+    const didHex = normalizeDidIdentifier(input.did);
+    this.requireCredentialType(input.credentialType);
+    if (!isValidStellarAddress(input.issuerAddress)) {
+      throw new BadRequestException(
+        `Invalid Stellar address: ${input.issuerAddress}`,
+      );
+    }
+
+    const issuer = this.signingKeys.getIssuerKeypair();
+    if (issuer.publicKey() !== input.issuerAddress) {
+      throw new ForbiddenException(
+        'Only the original issuer can revoke a credential',
+      );
+    }
+
+    const didEntity = await this.didRepository.findOne({
+      where: { address: didHex },
+    });
+    if (!didEntity) {
+      throw new NotFoundException(`DID not found: ${toCanonicalDid(didHex)}`);
+    }
+
+    const credential = await this.credentialRepository.findOne({
+      where: { didId: didEntity.id, credentialType: input.credentialType },
+      relations: ['issuer'],
+    });
+    if (!credential) {
+      throw new NotFoundException(
+        `Credential not found: ${toCanonicalDid(didHex)} type ${input.credentialType}`,
+      );
+    }
+    if (credential.issuer?.address !== issuer.publicKey()) {
+      throw new ForbiddenException(
+        'Only the original issuer can revoke a credential',
+      );
+    }
+    if (credential.isRevoked) {
+      throw new ConflictException(
+        `Credential already revoked: ${toCanonicalDid(didHex)} type ${input.credentialType}`,
+      );
+    }
+
+    const prepared = await this.stellarService.prepareContractCall({
+      sourceAddress: issuer.publicKey(),
+      contractId: this.contractId(),
+      method: 'revoke_credential',
+      args: [
+        new Address(issuer.publicKey()),
+        Buffer.from(didHex, 'hex'),
+        input.credentialType,
+      ],
+    });
+    await this.stellarService.submitContractTransaction({
+      transaction: prepared.transaction,
+      signers: [issuer],
+      sourceAddress: issuer.publicKey(),
+    });
+
+    credential.isRevoked = true;
+    credential.revokedAt = new Date();
+    return this.credentialRepository.save(credential);
+  }
+
+  private async requireDid(did: string): Promise<Did> {
+    const didHex = normalizeDidIdentifier(did);
+    const didEntity = await this.didRepository.findOne({
+      where: { address: didHex },
+    });
+    if (!didEntity) {
+      throw new NotFoundException(`DID not found: ${toCanonicalDid(didHex)}`);
+    }
+    return didEntity;
+  }
+
+  private requireCredentialType(credentialType: string): void {
+    if (!CREDENTIAL_TYPE_PATTERN.test(credentialType)) {
+      throw new BadRequestException(
+        `Credential type must match ${CREDENTIAL_TYPE_PATTERN}: ${credentialType}`,
+      );
+    }
+  }
+
+  private requireCredentialHash(credentialHash: string): void {
+    if (!SHA256_HEX_PATTERN.test(credentialHash)) {
+      throw new BadRequestException(
+        'Credential hash must be a 64-character lowercase SHA-256 hex digest',
+      );
+    }
+  }
+
+  private contractId(): string {
+    const contractId = this.configService.get<string>(
+      'app.stellar.credentialRegistryContractId',
+    );
+    if (!contractId) {
+      throw new ServiceUnavailableException(
+        'Credential operations are unavailable: STELLAR_CONTRACT_CREDENTIAL_REGISTRY is not configured',
+      );
+    }
+    return contractId;
   }
 }
