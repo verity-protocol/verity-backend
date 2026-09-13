@@ -1,26 +1,26 @@
 import {
+  Body,
   Controller,
   Get,
-  Post,
-  Delete,
-  Patch,
-  Body,
-  Param,
+  HttpCode,
   Logger,
+  NotFoundException,
+  Param,
+  Patch,
+  Post,
 } from '@nestjs/common';
 import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
-import { DidService } from './did.service';
+import { DidService, PrepareDidResult } from './did.service';
+import {
+  ConfirmCreateDidDto,
+  ConfirmLinkDidDto,
+  ConfirmUnlinkDidDto,
+  PrepareCreateDidDto,
+  PrepareLinkDidDto,
+  PrepareUnlinkDidDto,
+  SetVerificationDto,
+} from './dto/did.dto';
 
-/**
- * DID API — manages Decentralized Identifiers on Stellar.
- *
- * The DID is the user's permanent identity on Verity. It is NOT a wallet.
- * It is a separate on-chain record that can have one or more wallet addresses
- * linked to it. If a wallet is lost, the user links a new wallet to their
- * existing DID — identity is never lost.
- *
- * This is the core module — all other modules depend on it.
- */
 @ApiTags('did')
 @Controller('did')
 export class DidController {
@@ -28,127 +28,146 @@ export class DidController {
 
   constructor(private readonly didService: DidService) {}
 
-  /**
-   * Create a new DID for a wallet address.
-   *
-   * TODO: Implement
-   * - Validate wallet address format (Stellar G... address)
-   * - Check wallet doesn't already have a DID
-   * - Call StellarService to write DID record to did_registry contract
-   * - Store Did record in database with owner = wallet address
-   * - Link the wallet as primary
-   * - If nullifierHash provided, store nullifier for Sybil resistance
-   * - Return the DID document
-   */
-  @Post()
-  @ApiOperation({ summary: 'Create a new DID' })
-  @ApiResponse({ status: 201, description: 'DID created successfully' })
-  @ApiResponse({ status: 400, description: 'Invalid wallet address' })
-  async createDid(
-    @Body() _body: { ownerAddress: string; nullifierHash?: string },
-  ) {
-    this.logger.warn('createDid not yet implemented');
-    return { message: 'TODO: Create DID — see did.service.ts' };
+  @Post('prepare')
+  @HttpCode(200)
+  @ApiOperation({
+    summary: 'Prepare DID creation',
+    description:
+      'Returns a simulated transaction for the client to sign out-of-band. ' +
+      'The returned validUntilLedger is the deadline for confirm.',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Prepared transaction ready for signing',
+  })
+  @ApiResponse({ status: 422, description: 'Invalid DID identifier format' })
+  async prepareCreate(
+    @Body() body: PrepareCreateDidDto,
+  ): Promise<PrepareDidResult> {
+    return this.didService.prepareCreate(body.ownerAddress);
   }
 
-  /**
-   * Resolve a DID to its verification status and linked wallets.
-   *
-   * THIS IS THE REFERENCE IMPLEMENTATION — demonstrates the full
-   * NestJS → TypeORM → StellarService pattern.
-   *
-   * Flow:
-   * 1. Controller validates the identifier parameter
-   * 2. Service queries TypeORM for the Did record + relations
-   * 3. Service calls StellarService to get on-chain verification status
-   * 4. Returns formatted DID resolution document
-   */
+  @Post('prepare/link')
+  @HttpCode(200)
+  @ApiOperation({ summary: 'Prepare linking a wallet to a DID' })
+  @ApiResponse({
+    status: 200,
+    description: 'Prepared transaction ready for signing',
+  })
+  @ApiResponse({ status: 422, description: 'Invalid DID identifier format' })
+  async prepareLink(
+    @Body() body: PrepareLinkDidDto,
+  ): Promise<PrepareDidResult> {
+    return this.didService.prepareLink(body.didIdentifier, body.walletAddress);
+  }
+
+  @Post('prepare/unlink')
+  @HttpCode(200)
+  @ApiOperation({ summary: 'Prepare removing a wallet from a DID' })
+  @ApiResponse({
+    status: 200,
+    description: 'Prepared transaction ready for signing',
+  })
+  @ApiResponse({ status: 422, description: 'Invalid DID identifier format' })
+  async prepareUnlink(
+    @Body() body: PrepareUnlinkDidDto,
+  ): Promise<PrepareDidResult> {
+    return this.didService.prepareUnlink(
+      body.didIdentifier,
+      body.walletAddress,
+      body.callerAddress,
+    );
+  }
+
+  @Post('confirm')
+  @ApiOperation({
+    summary: 'Confirm DID creation with a user-signed transaction',
+  })
+  @ApiResponse({ status: 201, description: 'DID created successfully' })
+  @ApiResponse({ status: 400, description: 'Invalid transaction XDR' })
+  @ApiResponse({
+    status: 409,
+    description: 'Prepared transaction expired or contention',
+  })
+  @ApiResponse({ status: 422, description: 'Invalid DID identifier format' })
+  async confirmCreate(@Body() body: ConfirmCreateDidDto) {
+    return this.didService.confirmCreate(body);
+  }
+
+  @Post('confirm/link')
+  @ApiOperation({
+    summary: 'Confirm linking a wallet with a user-signed transaction',
+  })
+  @ApiResponse({ status: 201, description: 'Wallet linked successfully' })
+  @ApiResponse({ status: 400, description: 'Invalid transaction XDR' })
+  @ApiResponse({ status: 404, description: 'DID not found' })
+  @ApiResponse({
+    status: 409,
+    description: 'Prepared transaction expired or contention',
+  })
+  async confirmLink(@Body() body: ConfirmLinkDidDto) {
+    return this.didService.confirmLink(body);
+  }
+
+  @Post('confirm/unlink')
+  @ApiOperation({
+    summary: 'Confirm removing a wallet with a user-signed transaction',
+  })
+  @ApiResponse({ status: 201, description: 'Wallet removed successfully' })
+  @ApiResponse({ status: 400, description: 'Invalid transaction XDR' })
+  @ApiResponse({ status: 404, description: 'DID not found' })
+  @ApiResponse({
+    status: 409,
+    description: 'Prepared transaction expired or contention',
+  })
+  async confirmUnlink(@Body() body: ConfirmUnlinkDidDto) {
+    return this.didService.confirmUnlink(body);
+  }
+
+  @Get('wallet/:address')
+  @ApiOperation({
+    summary: 'Find a DID by wallet address (chain-authoritative)',
+    description:
+      'Queries the did_registry contract first; the database record is only ' +
+      'returned if the chain still maps the wallet to that DID.',
+  })
+  @ApiResponse({ status: 200, description: 'DID found for wallet' })
+  @ApiResponse({ status: 404, description: 'No DID found for wallet' })
+  async findByWallet(@Param('address') address: string) {
+    const record = await this.didService.findByWallet(address);
+    if (!record) {
+      throw new NotFoundException(`No DID found for wallet ${address}`);
+    }
+    return record;
+  }
+
   @Get(':identifier')
   @ApiOperation({ summary: 'Resolve a DID to its verification document' })
   @ApiResponse({ status: 200, description: 'DID resolution document returned' })
   @ApiResponse({ status: 404, description: 'DID not found' })
+  @ApiResponse({ status: 422, description: 'Invalid DID identifier format' })
   async resolveDid(@Param('identifier') identifier: string) {
     return this.didService.resolve(identifier);
   }
 
-  /**
-   * List all wallets linked to a DID.
-   *
-   * TODO: Implement
-   * - Look up DID by address
-   * - Return all linked wallets with isPrimary flag
-   */
   @Get(':identifier/wallets')
   @ApiOperation({ summary: 'List wallets linked to a DID' })
   @ApiResponse({ status: 200, description: 'List of linked wallets' })
   @ApiResponse({ status: 404, description: 'DID not found' })
-  async listWallets(@Param('identifier') _identifier: string) {
-    this.logger.warn('listWallets not yet implemented');
-    return { message: 'TODO: List wallets — see did.service.ts' };
+  @ApiResponse({ status: 422, description: 'Invalid DID identifier format' })
+  async listWallets(@Param('identifier') identifier: string) {
+    return this.didService.listWallets(identifier);
   }
 
-  /**
-   * Link a new wallet to a DID.
-   *
-   * TODO: Implement
-   * - Validate caller is the DID owner (require_auth equivalent)
-   * - Validate new wallet address format
-   * - Check wallet isn't already linked
-   * - Call StellarService to write wallet link to did_registry contract
-   * - Store Wallet record in database
-   */
-  @Post(':identifier/wallets')
-  @ApiOperation({ summary: 'Link a wallet to a DID' })
-  @ApiResponse({ status: 201, description: 'Wallet linked successfully' })
-  @ApiResponse({ status: 400, description: 'Invalid wallet address' })
-  @ApiResponse({ status: 404, description: 'DID not found' })
-  async linkWallet(
-    @Param('identifier') _identifier: string,
-    @Body() _body: { walletAddress: string },
-  ) {
-    this.logger.warn('linkWallet not yet implemented');
-    return { message: 'TODO: Link wallet — see did.service.ts' };
-  }
-
-  /**
-   * Remove a wallet from a DID.
-   *
-   * TODO: Implement
-   * - Validate caller is the DID owner
-   * - Check this isn't the last wallet
-   * - Call StellarService to remove wallet from did_registry contract
-   * - Delete Wallet record from database
-   */
-  @Delete(':identifier/wallets/:address')
-  @ApiOperation({ summary: 'Remove a wallet from a DID' })
-  @ApiResponse({ status: 200, description: 'Wallet removed successfully' })
-  @ApiResponse({ status: 400, description: 'Cannot remove last wallet' })
-  @ApiResponse({ status: 404, description: 'DID or wallet not found' })
-  async unlinkWallet(
-    @Param('identifier') _identifier: string,
-    @Param('address') _address: string,
-  ) {
-    this.logger.warn('unlinkWallet not yet implemented');
-    return { message: 'TODO: Unlink wallet — see did.service.ts' };
-  }
-
-  /**
-   * Set verification status of a DID (admin-only).
-   *
-   * TODO: Implement
-   * - Validate caller is admin
-   * - Update Did.isVerified in database
-   * - Update on-chain verification status via StellarService
-   */
   @Patch(':identifier/verification')
   @ApiOperation({ summary: 'Set verification status of a DID (admin-only)' })
   @ApiResponse({ status: 200, description: 'Verification status updated' })
   @ApiResponse({ status: 404, description: 'DID not found' })
+  @ApiResponse({ status: 422, description: 'Invalid DID identifier format' })
   async setVerification(
-    @Param('identifier') _identifier: string,
-    @Body() _body: { isVerified: boolean },
+    @Param('identifier') identifier: string,
+    @Body() body: SetVerificationDto,
   ) {
-    this.logger.warn('setVerification not yet implemented');
-    return { message: 'TODO: Set verification — see did.service.ts' };
+    return this.didService.setVerification(identifier, body.isVerified);
   }
 }
