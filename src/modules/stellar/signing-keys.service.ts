@@ -12,6 +12,7 @@ export class SigningKeysService {
   private readonly nodeEnv: string;
   private feeSponsor?: Keypair;
   private admin?: Keypair;
+  private issuer?: Keypair;
 
   constructor(private readonly configService: ConfigService) {
     this.nodeEnv =
@@ -23,6 +24,9 @@ export class SigningKeysService {
       }
       if (!this.adminSecret) {
         missing.push('STELLAR_ADMIN_SECRET');
+      }
+      if (!this.issuerSecret) {
+        missing.push('STELLAR_ISSUER_SECRET');
       }
       if (missing.length > 0) {
         throw new Error(
@@ -60,11 +64,29 @@ export class SigningKeysService {
     return this.admin;
   }
 
+  getIssuerKeypair(): Keypair {
+    if (!this.issuer) {
+      const secret = this.issuerSecret;
+      if (!secret) {
+        this.logger.warn('STELLAR_ISSUER_SECRET not configured');
+        throw new ServiceUnavailableException(
+          'Credential issuance is unavailable: issuer key not configured',
+        );
+      }
+      this.issuer = Keypair.fromSecret(secret);
+    }
+    return this.issuer;
+  }
+
   private get feeSponsorSecret(): string | undefined {
     return this.configService.get<string>('app.stellar.feeSponsorSecret');
   }
 
   private get adminSecret(): string | undefined {
     return this.configService.get<string>('app.stellar.adminSecret');
+  }
+
+  private get issuerSecret(): string | undefined {
+    return this.configService.get<string>('app.stellar.issuerSecret');
   }
 }

@@ -64,8 +64,32 @@ describe('SigningKeysService', () => {
     });
   });
 
+  describe('getIssuerKeypair', () => {
+    it('should return a keypair when configured', () => {
+      const secret = Keypair.random().secret();
+      const service = buildService({
+        'app.stellar.issuerSecret': secret,
+      });
+      expect(service.getIssuerKeypair().secret()).toBe(secret);
+    });
+
+    it('should throw ServiceUnavailableException when not configured', () => {
+      const service = buildService({});
+      expect(() => service.getIssuerKeypair()).toThrow(
+        ServiceUnavailableException,
+      );
+    });
+
+    it('should cache the keypair across calls', () => {
+      const service = buildService({
+        'app.stellar.issuerSecret': Keypair.random().secret(),
+      });
+      expect(service.getIssuerKeypair()).toBe(service.getIssuerKeypair());
+    });
+  });
+
   describe('production boot guard', () => {
-    it('should fail construction when either secret is missing in production', () => {
+    it('should fail construction when a secret is missing in production', () => {
       expect(() => buildService({ 'app.nodeEnv': 'production' })).toThrow(
         /STELLAR_FEE_SPONSOR_SECRET/,
       );
@@ -75,14 +99,22 @@ describe('SigningKeysService', () => {
           'app.stellar.feeSponsorSecret': Keypair.random().secret(),
         }),
       ).toThrow(/STELLAR_ADMIN_SECRET/);
-    });
-
-    it('should not throw in production when both secrets are present', () => {
       expect(() =>
         buildService({
           'app.nodeEnv': 'production',
           'app.stellar.feeSponsorSecret': Keypair.random().secret(),
           'app.stellar.adminSecret': Keypair.random().secret(),
+        }),
+      ).toThrow(/STELLAR_ISSUER_SECRET/);
+    });
+
+    it('should not throw in production when all secrets are present', () => {
+      expect(() =>
+        buildService({
+          'app.nodeEnv': 'production',
+          'app.stellar.feeSponsorSecret': Keypair.random().secret(),
+          'app.stellar.adminSecret': Keypair.random().secret(),
+          'app.stellar.issuerSecret': Keypair.random().secret(),
         }),
       ).not.toThrow();
     });

@@ -16,8 +16,11 @@ export const configuration = registerAs('app', () => ({
       process.env.STELLAR_PASSPHRASE ||
       'Test SDF Future Network ; October 2022',
     didRegistryContractId: process.env.STELLAR_CONTRACT_DID_REGISTRY,
+    credentialRegistryContractId:
+      process.env.STELLAR_CONTRACT_CREDENTIAL_REGISTRY,
     feeSponsorSecret: process.env.STELLAR_FEE_SPONSOR_SECRET,
     adminSecret: process.env.STELLAR_ADMIN_SECRET,
+    issuerSecret: process.env.STELLAR_ISSUER_SECRET,
   },
   kyc: {
     apiUrl: process.env.KYC_PROVIDER_API_URL,

@@ -19,6 +19,8 @@ export const envValidationSchema = Joi.object({
   STELLAR_CONTRACT_DID_REGISTRY: Joi.string().optional(),
   STELLAR_FEE_SPONSOR_SECRET: Joi.string().optional(),
   STELLAR_ADMIN_SECRET: Joi.string().optional(),
+  STELLAR_ISSUER_SECRET: Joi.string().optional(),
+  STELLAR_CONTRACT_CREDENTIAL_REGISTRY: Joi.string().optional(),
   KYC_PROVIDER_API_URL: Joi.string().uri().required(),
   KYC_PROVIDER_API_KEY: Joi.string().required(),
   CORS_ORIGIN: Joi.string().default('*'),
