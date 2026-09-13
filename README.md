@@ -179,6 +179,35 @@ pnpm run test:e2e   # E2E tests
 pnpm run test:cov   # Coverage report
 ```
 
+### StellarService test strategy & its blind spot
+
+`StellarService` behavior is covered by **mocked unit tests** (`src/modules/stellar/stellar.service.spec.ts`) that run in CI: fast, deterministic, no network. They prove the service encodes arguments and parses responses the way the code *expects* `@stellar/stellar-sdk` and Horizon/RPC behave.
+
+That is the entire point — and the entire limitation. Mocks can never prove the code matches what the real network/RPC *actually* does. If Horizon changes a response shape, or the SDK changes how it encodes a value (a live risk right after any SDK/dependency bump), mocked tests can stay green while the service silently breaks against the real network. Always keep this in mind when reviewing changes that touch `StellarService`.
+
+### Local sandbox e2e (opt-in, manual)
+
+To catch that real-network drift, an opt-in e2e suite runs the real `StellarService` against a local Stellar standalone network. It is intentionally **not** part of `pnpm test` and **not** invoked by CI.
+
+Prerequisites:
+
+- Docker (required)
+- stellar CLI (`stellar`) for key funding + contract deployment
+- a `verity-contracts` checkout alongside this repo (default `../verity-contracts`, override with `STELLAR_CONTRACTS_DIR`)
+- `wasm32-unknown-unknown` Rust target (`rustup target add wasm32-unknown-unknown`)
+- wasm artifacts (optional): to actually exercise the contracts, [build verity-contracts](https://github.com/verity-protocol/verity-contracts) into `target/wasm32-unknown-unknown/release`.
+
+Run it:
+
+```bash
+pnpm run e2e:local:setup   # starts the sandbox, funds a key, deploys did_registry
+pnpm run test:e2e:local    # runs the suite against the live sandbox
+```
+
+**Run this before submitting a PR that touches `StellarService`, after any `@stellar/stellar-sdk` bump, and before cutting a release.**
+
+If a prerequisite is missing, the setup script still starts the sandbox and writes `test/e2e-local/.e2e-local.env` (gitignored) with the values it could produce; fill in the missing ones and re-run `pnpm run test:e2e:local`. The suite self-skips with a message when the required env vars aren't set.
+
 ## Project Structure
 
 ```
