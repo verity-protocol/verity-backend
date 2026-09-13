@@ -1,175 +1,515 @@
-import { Injectable, Logger, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ConflictException,
+  Injectable,
+  Logger,
+  NotFoundException,
+  ServiceUnavailableException,
+} from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
+import {
+  Address,
+  Keypair,
+  rpc as SorobanRpc,
+  scValToNative,
+  Transaction,
+  TransactionBuilder,
+  xdr,
+} from '@stellar/stellar-sdk';
+import { StellarService } from '../stellar/stellar.service';
+import { SigningKeysService } from '../stellar/signing-keys.service';
+import {
+  DidPrepareExpiredError,
+  DidSubmissionContentionError,
+} from '../stellar/stellar-errors';
 import { Did } from './entities/did.entity';
 import { Wallet } from './entities/wallet.entity';
+import { Nullifier } from './entities/nullifier.entity';
+import {
+  isValidStellarAddress,
+  normalizeDidIdentifier,
+  toCanonicalDid,
+} from './did-identifier';
 
-/**
- * DID Service — the core service for Verity identity management.
- *
- * This service is fully implemented for the `resolve()` method as a
- * reference pattern for contributors. All other methods are stubs
- * with TODO comments explaining the implementation intent.
- *
- * Pattern: Controller → Service → TypeORM + StellarService
- */
+export interface PrepareDidResult {
+  method: string;
+  contractId: string;
+  did?: string;
+  txXdr: string;
+  authExpirationLedgers: number[];
+  validUntilLedger?: number;
+}
+
+export interface ConfirmCreateInput {
+  txXdr: string;
+  nullifierHash?: string;
+}
+
+export interface ConfirmLinkInput {
+  txXdr: string;
+}
+
+export interface ConfirmUnlinkInput {
+  txXdr: string;
+}
+
+export interface DidResolution {
+  did: string;
+  owner: string;
+  isVerified: boolean;
+  wallets: string[];
+  credentials: Array<{
+    type: string;
+    issuer: string;
+    issuedAt: Date;
+    isRevoked: boolean;
+  }>;
+  createdAt: Date;
+}
+
 @Injectable()
 export class DidService {
   private readonly logger = new Logger(DidService.name);
 
   constructor(
+    private readonly configService: ConfigService,
+    private readonly stellarService: StellarService,
+    private readonly signingKeys: SigningKeysService,
     @InjectRepository(Did)
     private readonly didRepository: Repository<Did>,
     @InjectRepository(Wallet)
     private readonly walletRepository: Repository<Wallet>,
+    @InjectRepository(Nullifier)
+    private readonly nullifierRepository: Repository<Nullifier>,
   ) {}
 
-  /**
-   * Resolve a DID to its full verification document.
-   *
-   * This is the reference implementation — demonstrates the complete
-   * NestJS → TypeORM → StellarService pattern.
-   *
-   * Flow:
-   * 1. Query the `did` table by address
-   * 2. If not found, throw NotFoundException (404)
-   * 3. Load linked wallets via relation
-   * 4. Load non-revoked credentials via relation
-   * 5. Return formatted DID resolution document
-   *
-   * Note: In a full implementation, step 4 would also call
-   * StellarService.queryContract() to verify on-chain status.
-   * For now, we only read from the local database.
-   */
-  async resolve(identifier: string): Promise<{
-    did: string;
-    owner: string;
-    isVerified: boolean;
-    wallets: string[];
-    credentials: Array<{
-      type: string;
-      issuer: string;
-      issuedAt: Date;
-      isRevoked: boolean;
-    }>;
-    createdAt: Date;
-  }> {
-    const did = await this.didRepository.findOne({
-      where: { address: identifier },
-      relations: ['wallets', 'credentials', 'credentials.issuer'],
+  async prepareCreate(ownerAddress: string): Promise<PrepareDidResult> {
+    this.requireWalletAddress(ownerAddress);
+    const feeSponsor = this.signingKeys.getFeeSponsorKeypair();
+    const contractId = this.contractId();
+    const prepared = await this.stellarService.prepareContractCall({
+      sourceAddress: feeSponsor.publicKey(),
+      contractId,
+      method: 'create_did',
+      args: [new Address(ownerAddress)],
     });
-
-    if (!did) {
-      throw new NotFoundException(`DID not found: ${identifier}`);
-    }
-
-    // Filter to non-revoked credentials only
-    const activeCredentials = (did.credentials || [])
-      .filter((c) => !c.isRevoked)
-      .map((c) => ({
-        type: c.credentialType,
-        issuer: c.issuer?.address || 'unknown',
-        issuedAt: c.issuedAt,
-        isRevoked: c.isRevoked,
-      }));
-
-    const wallets = (did.wallets || []).map((w) => w.address);
-
+    const did = this.toDidHex(prepared.retval);
     return {
-      did: did.address,
-      owner: did.owner,
-      isVerified: did.isVerified,
-      wallets,
-      credentials: activeCredentials,
-      createdAt: did.createdAt,
+      method: 'create_did',
+      contractId,
+      did: did ? toCanonicalDid(did) : undefined,
+      txXdr: prepared.transaction.toXDR(),
+      authExpirationLedgers: prepared.authExpirationLedgers,
+      validUntilLedger: this.minLedger(prepared.authExpirationLedgers),
     };
   }
 
-  /**
-   * Create a new DID.
-   *
-   * TODO: Implement full flow:
-   * 1. Validate ownerAddress is a valid Stellar G... address
-   * 2. Check no DID exists with this owner already
-   * 3. Call StellarService to write DID record to did_registry contract
-   *    - Use StellarService.buildInvokeContractTx() to build the transaction
-   *    - Sign with the backend's signing key
-   *    - Submit via StellarService.submitTransaction()
-   * 4. Extract the DID address from the transaction result
-   * 5. Store Did record in database: { address, owner: ownerAddress, isVerified: false }
-   * 6. Create Wallet record: { address: ownerAddress, didId, isPrimary: true }
-   * 7. If nullifierHash provided, store Nullifier record
-   * 8. Return the created Did
-   */
-  async create(_ownerAddress: string, _nullifierHash?: string): Promise<Did> {
-    this.logger.warn('DidService.create not yet implemented');
-    throw new Error('Not implemented');
+  async confirmCreate(input: ConfirmCreateInput): Promise<DidResolution> {
+    let didHex = '';
+    await this.confirm({
+      method: 'create_did',
+      txXdr: input.txXdr,
+      onSuccess: async (transaction, result) => {
+        didHex = this.didFromCreateResult(result);
+        const owner = this.walletFromTransaction(transaction, 0);
+        const didEntity = await this.didRepository.findOne({
+          where: { address: didHex },
+        });
+        if (!didEntity) {
+          const created = await this.didRepository.save(
+            this.didRepository.create({
+              address: didHex,
+              owner,
+              isVerified: false,
+            }),
+          );
+          await this.walletRepository.save(
+            this.walletRepository.create({
+              address: owner,
+              didId: created.id,
+              isPrimary: true,
+            }),
+          );
+        }
+      },
+    });
+    if (input.nullifierHash) {
+      await this.storeNullifier(didHex, input.nullifierHash);
+    }
+    return this.resolveEntity(didHex);
   }
 
-  /**
-   * Link a new wallet to a DID.
-   *
-   * TODO: Implement:
-   * 1. Validate the DID exists
-   * 2. Validate newWalletAddress is a valid Stellar address
-   * 3. Check wallet isn't already linked to any DID
-   * 4. Call StellarService to write wallet link to did_registry contract
-   * 5. Create Wallet record in database
-   * 6. Return the updated wallet list
-   */
-  async linkWallet(
-    _didAddress: string,
-    _newWalletAddress: string,
-  ): Promise<Wallet> {
-    this.logger.warn('DidService.linkWallet not yet implemented');
-    throw new Error('Not implemented');
+  async prepareLink(
+    didIdentifier: string,
+    walletAddress: string,
+  ): Promise<PrepareDidResult> {
+    const didHex = normalizeDidIdentifier(didIdentifier);
+    this.requireWalletAddress(walletAddress);
+    const feeSponsor = this.signingKeys.getFeeSponsorKeypair();
+    const contractId = this.contractId();
+    const prepared = await this.stellarService.prepareContractCall({
+      sourceAddress: feeSponsor.publicKey(),
+      contractId,
+      method: 'link_wallet',
+      args: [Buffer.from(didHex, 'hex'), new Address(walletAddress)],
+    });
+    return {
+      method: 'link_wallet',
+      contractId,
+      did: toCanonicalDid(didHex),
+      txXdr: prepared.transaction.toXDR(),
+      authExpirationLedgers: prepared.authExpirationLedgers,
+      validUntilLedger: this.minLedger(prepared.authExpirationLedgers),
+    };
   }
 
-  /**
-   * Remove a wallet from a DID.
-   *
-   * TODO: Implement:
-   * 1. Load DID with wallets
-   * 2. Check wallet is linked to this DID
-   * 3. Check this isn't the last wallet (DID must have ≥1)
-   * 4. Call StellarService to remove wallet from did_registry contract
-   * 5. Delete Wallet record from database
-   */
-  async unlinkWallet(
-    _didAddress: string,
-    _walletAddress: string,
-  ): Promise<void> {
-    this.logger.warn('DidService.unlinkWallet not yet implemented');
-    throw new Error('Not implemented');
+  async confirmLink(input: ConfirmLinkInput): Promise<DidResolution> {
+    let didHex = '';
+    await this.confirm({
+      method: 'link_wallet',
+      txXdr: input.txXdr,
+      onSuccess: async (transaction, _result) => {
+        didHex = this.didFromTransaction(transaction, 0);
+        const walletAddress = this.walletFromTransaction(transaction, 1);
+        const didEntity = await this.didRepository.findOne({
+          where: { address: didHex },
+        });
+        if (!didEntity) {
+          throw new NotFoundException(
+            `DID not found in database: ${toCanonicalDid(didHex)}`,
+          );
+        }
+        const existing = await this.walletRepository.findOne({
+          where: { didId: didEntity.id, address: walletAddress },
+        });
+        if (!existing) {
+          await this.walletRepository.save(
+            this.walletRepository.create({
+              address: walletAddress,
+              didId: didEntity.id,
+              isPrimary: false,
+            }),
+          );
+        }
+      },
+    });
+    return this.resolveEntity(didHex);
   }
 
-  /**
-   * Set verification status of a DID.
-   *
-   * TODO: Implement:
-   * 1. Load Did by address
-   * 2. Update isVerified field
-   * 3. Save to database
-   * 4. Call StellarService to update on-chain verification status
-   */
+  async prepareUnlink(
+    didIdentifier: string,
+    walletAddress: string,
+    callerAddress: string,
+  ): Promise<PrepareDidResult> {
+    const didHex = normalizeDidIdentifier(didIdentifier);
+    this.requireWalletAddress(walletAddress);
+    this.requireWalletAddress(callerAddress);
+    const feeSponsor = this.signingKeys.getFeeSponsorKeypair();
+    const contractId = this.contractId();
+    const prepared = await this.stellarService.prepareContractCall({
+      sourceAddress: feeSponsor.publicKey(),
+      contractId,
+      method: 'unlink_wallet',
+      args: [
+        Buffer.from(didHex, 'hex'),
+        new Address(walletAddress),
+        new Address(callerAddress),
+      ],
+    });
+    return {
+      method: 'unlink_wallet',
+      contractId,
+      did: toCanonicalDid(didHex),
+      txXdr: prepared.transaction.toXDR(),
+      authExpirationLedgers: prepared.authExpirationLedgers,
+      validUntilLedger: this.minLedger(prepared.authExpirationLedgers),
+    };
+  }
+
+  async confirmUnlink(input: ConfirmUnlinkInput): Promise<DidResolution> {
+    let didHex = '';
+    await this.confirm({
+      method: 'unlink_wallet',
+      txXdr: input.txXdr,
+      onSuccess: async (transaction, _result) => {
+        didHex = this.didFromTransaction(transaction, 0);
+        const walletAddress = this.walletFromTransaction(transaction, 1);
+        const didEntity = await this.didRepository.findOne({
+          where: { address: didHex },
+        });
+        if (!didEntity) {
+          throw new NotFoundException(
+            `DID not found in database: ${toCanonicalDid(didHex)}`,
+          );
+        }
+        await this.walletRepository.delete({
+          didId: didEntity.id,
+          address: walletAddress,
+        });
+      },
+    });
+    return this.resolveEntity(didHex);
+  }
+
+  async resolve(identifier: string): Promise<DidResolution> {
+    const didHex = normalizeDidIdentifier(identifier);
+    return this.resolveEntity(didHex);
+  }
+
+  async findByWallet(walletAddress: string): Promise<Did | null> {
+    this.requireWalletAddress(walletAddress);
+    const feeSponsor = this.signingKeys.getFeeSponsorKeypair();
+    const result = await this.stellarService.queryContract(
+      this.contractId(),
+      'get_did_for_wallet',
+      [new Address(walletAddress)],
+      feeSponsor.publicKey(),
+    );
+    const didHex = this.toDidHex(result);
+    if (!didHex) {
+      return null;
+    }
+    const record = await this.didRepository.findOne({
+      where: { address: didHex },
+      relations: ['wallets'],
+    });
+    return record ?? null;
+  }
+
+  async listWallets(identifier: string): Promise<Wallet[]> {
+    const didHex = normalizeDidIdentifier(identifier);
+    const didEntity = await this.didRepository.findOne({
+      where: { address: didHex },
+      relations: ['wallets'],
+    });
+    if (!didEntity) {
+      throw new NotFoundException(`DID not found: ${toCanonicalDid(didHex)}`);
+    }
+    return didEntity.wallets || [];
+  }
+
   async setVerification(
-    _didAddress: string,
-    _isVerified: boolean,
-  ): Promise<void> {
-    this.logger.warn('DidService.setVerification not yet implemented');
-    throw new Error('Not implemented');
+    identifier: string,
+    isVerified: boolean,
+  ): Promise<DidResolution> {
+    const didHex = normalizeDidIdentifier(identifier);
+    const admin = this.signingKeys.getAdminKeypair();
+    const contractId = this.contractId();
+    const prepared = await this.stellarService.prepareContractCall({
+      sourceAddress: admin.publicKey(),
+      contractId,
+      method: 'set_verified',
+      args: [Buffer.from(didHex, 'hex'), isVerified],
+    });
+    await this.submitOrConflict({
+      transaction: prepared.transaction,
+      signers: [admin],
+      sourceAddress: admin.publicKey(),
+      validUntilLedger: this.minLedger(prepared.authExpirationLedgers),
+    });
+    const didEntity = await this.didRepository.findOne({
+      where: { address: didHex },
+    });
+    if (didEntity) {
+      didEntity.isVerified = isVerified;
+      await this.didRepository.save(didEntity);
+    }
+    return this.resolveEntity(didHex);
   }
 
-  /**
-   * Find a DID by wallet address.
-   *
-   * TODO: Implement:
-   * 1. Query Wallet table by address
-   * 2. Load the related Did
-   * 3. Return the Did or null
-   */
-  async findByWallet(_walletAddress: string): Promise<Did | null> {
-    this.logger.warn('DidService.findByWallet not yet implemented');
-    return null;
+  private async confirm(input: {
+    method: string;
+    txXdr: string;
+    onSuccess: (
+      transaction: Transaction,
+      result: SorobanRpc.Api.GetTransactionResponse,
+    ) => Promise<void>;
+  }): Promise<void> {
+    const feeSponsor = this.signingKeys.getFeeSponsorKeypair();
+    const transaction = this.parseTransaction(input.txXdr);
+    const validUntilLedger = this.minLedger(
+      this.stellarService.extractAuthExpirationLedgers(transaction),
+    );
+    const result = await this.submitOrConflict({
+      transaction,
+      signers: [feeSponsor],
+      sourceAddress: feeSponsor.publicKey(),
+      validUntilLedger,
+    });
+    await input.onSuccess(transaction, result);
+  }
+
+  private async submitOrConflict(input: {
+    transaction: Transaction;
+    signers: Keypair[];
+    sourceAddress: string;
+    validUntilLedger?: number;
+  }): Promise<SorobanRpc.Api.GetTransactionResponse> {
+    try {
+      return await this.stellarService.submitContractTransaction({
+        transaction: input.transaction,
+        signers: input.signers,
+        sourceAddress: input.sourceAddress,
+        isValidBeforeSubmit:
+          input.validUntilLedger !== undefined
+            ? async () => {
+                const latest =
+                  await this.stellarService.getLatestLedgerSequence();
+                if (latest > (input.validUntilLedger as number)) {
+                  throw new DidPrepareExpiredError();
+                }
+              }
+            : undefined,
+      });
+    } catch (error) {
+      if (
+        error instanceof DidPrepareExpiredError ||
+        error instanceof DidSubmissionContentionError
+      ) {
+        throw new ConflictException(error.message);
+      }
+      throw error;
+    }
+  }
+
+  private async resolveEntity(didHex: string): Promise<DidResolution> {
+    const didEntity = await this.didRepository.findOne({
+      where: { address: didHex },
+      relations: ['wallets', 'credentials', 'credentials.issuer'],
+    });
+    if (!didEntity) {
+      throw new NotFoundException(`DID not found: ${toCanonicalDid(didHex)}`);
+    }
+    return {
+      did: toCanonicalDid(didEntity.address),
+      owner: didEntity.owner,
+      isVerified: didEntity.isVerified,
+      wallets: (didEntity.wallets || []).map((w) => w.address),
+      credentials: (didEntity.credentials || [])
+        .filter((c) => !c.isRevoked)
+        .map((c) => ({
+          type: c.credentialType,
+          issuer: c.issuer?.address || 'unknown',
+          issuedAt: c.issuedAt,
+          isRevoked: c.isRevoked,
+        })),
+      createdAt: didEntity.createdAt,
+    };
+  }
+
+  private async storeNullifier(
+    didHex: string,
+    nullifierHash: string,
+  ): Promise<void> {
+    const existing = await this.nullifierRepository.findOne({
+      where: { hash: nullifierHash },
+    });
+    if (existing) {
+      return;
+    }
+    const didEntity = await this.didRepository.findOne({
+      where: { address: didHex },
+    });
+    await this.nullifierRepository.save(
+      this.nullifierRepository.create({
+        hash: nullifierHash,
+        didId: didEntity?.id ?? null,
+      }),
+    );
+  }
+
+  private parseTransaction(txXdr: string): Transaction {
+    try {
+      const parsed = TransactionBuilder.fromXDR(txXdr, this.passphrase);
+      if ('innerTransaction' in parsed) {
+        throw new Error('fee-bump envelopes are not supported');
+      }
+      return parsed;
+    } catch (error) {
+      if (error instanceof BadRequestException) {
+        throw error;
+      }
+      throw new BadRequestException('Invalid transaction XDR');
+    }
+  }
+
+  private didFromCreateResult(
+    result: SorobanRpc.Api.GetTransactionResponse,
+  ): string {
+    const successful =
+      result as SorobanRpc.Api.GetSuccessfulTransactionResponse;
+    if (!successful.returnValue) {
+      throw new Error('create_did submission returned no DID identifier');
+    }
+    const native = scValToNative(successful.returnValue);
+    const hex = this.toDidHex(native);
+    if (!hex) {
+      throw new Error('create_did submission returned no DID identifier');
+    }
+    return hex;
+  }
+
+  private didFromTransaction(transaction: Transaction, index: number): string {
+    const args = this.invokeArgs(transaction);
+    return Buffer.from(args[index].bytes()).toString('hex');
+  }
+
+  private walletFromTransaction(
+    transaction: Transaction,
+    index: number,
+  ): string {
+    const args = this.invokeArgs(transaction);
+    return Address.fromScVal(args[index]).toString();
+  }
+
+  private invokeArgs(transaction: Transaction): xdr.ScVal[] {
+    const [operation] = transaction.operations;
+    if (!operation || operation.type !== 'invokeHostFunction') {
+      throw new BadRequestException(
+        'Transaction must contain a single invokeHostFunction operation',
+      );
+    }
+    return operation.func.invokeContract().args();
+  }
+
+  private toDidHex(value: unknown): string | undefined {
+    if (value instanceof Uint8Array && value.length > 0) {
+      return Buffer.from(value).toString('hex');
+    }
+    return undefined;
+  }
+
+  private minLedger(ledgers: number[]): number | undefined {
+    if (ledgers.length === 0) {
+      return undefined;
+    }
+    return Math.min(...ledgers);
+  }
+
+  private requireWalletAddress(address: string): void {
+    if (!isValidStellarAddress(address)) {
+      throw new BadRequestException(`Invalid Stellar address: ${address}`);
+    }
+  }
+
+  private contractId(): string {
+    const contractId = this.configService.get<string>(
+      'app.stellar.didRegistryContractId',
+    );
+    if (!contractId) {
+      throw new ServiceUnavailableException(
+        'DID operations are unavailable: STELLAR_CONTRACT_DID_REGISTRY is not configured',
+      );
+    }
+    return contractId;
+  }
+
+  private get passphrase(): string {
+    return (
+      this.configService.get<string>('app.stellar.passphrase') ||
+      'Test SDF Future Network ; October 2022'
+    );
   }
 }

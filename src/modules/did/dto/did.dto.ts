@@ -1,6 +1,6 @@
-import { IsString, IsNotEmpty, IsOptional } from 'class-validator';
+import { IsBoolean, IsNotEmpty, IsOptional, IsString } from 'class-validator';
 
-export class CreateDidDto {
+export class PrepareCreateDidDto {
   @IsString()
   @IsNotEmpty()
   ownerAddress: string;
@@ -10,19 +10,54 @@ export class CreateDidDto {
   nullifierHash?: string;
 }
 
-export class LinkWalletDto {
+export class PrepareLinkDidDto {
+  @IsString()
+  @IsNotEmpty()
+  didIdentifier: string;
+
   @IsString()
   @IsNotEmpty()
   walletAddress: string;
 }
 
-export class UnlinkWalletDto {
+export class PrepareUnlinkDidDto {
+  @IsString()
+  @IsNotEmpty()
+  didIdentifier: string;
+
   @IsString()
   @IsNotEmpty()
   walletAddress: string;
+
+  @IsString()
+  @IsNotEmpty()
+  callerAddress: string;
+}
+
+export class ConfirmCreateDidDto {
+  @IsString()
+  @IsNotEmpty()
+  txXdr: string;
+
+  @IsString()
+  @IsOptional()
+  nullifierHash?: string;
+}
+
+export class ConfirmLinkDidDto {
+  @IsString()
+  @IsNotEmpty()
+  txXdr: string;
+}
+
+export class ConfirmUnlinkDidDto {
+  @IsString()
+  @IsNotEmpty()
+  txXdr: string;
 }
 
 export class SetVerificationDto {
+  @IsBoolean()
   @IsNotEmpty()
   isVerified: boolean;
 }

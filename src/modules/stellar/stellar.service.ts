@@ -23,6 +23,19 @@ export interface SubmitContractTransactionInput {
   isValidBeforeSubmit?: () => Promise<void>;
 }
 
+export interface PrepareContractCallInput {
+  sourceAddress: string;
+  contractId: string;
+  method: string;
+  args?: unknown[];
+}
+
+export interface PreparedContractCall {
+  transaction: Transaction;
+  retval?: unknown;
+  authExpirationLedgers: number[];
+}
+
 @Injectable()
 export class StellarService {
   private readonly logger = new Logger(StellarService.name);
@@ -162,7 +175,7 @@ export class StellarService {
 
   async submitContractTransaction(
     input: SubmitContractTransactionInput,
-  ): Promise<unknown> {
+  ): Promise<SorobanRpc.Api.GetTransactionResponse> {
     return this.submitQueue.enqueue(input.sourceAddress, () =>
       this.submitWithContentionRetry(input),
     );
@@ -170,7 +183,7 @@ export class StellarService {
 
   private async submitWithContentionRetry(
     input: SubmitContractTransactionInput,
-  ): Promise<unknown> {
+  ): Promise<SorobanRpc.Api.GetTransactionResponse> {
     for (
       let attempt = 0;
       attempt < StellarService.MAX_SUBMIT_RETRIES;
@@ -352,7 +365,20 @@ export class StellarService {
     method: string,
     args?: unknown[],
   ): Promise<Transaction> {
-    const scVals = (args ?? []).map((arg) => nativeToScVal(arg));
+    const prepared = await this.prepareContractCall({
+      sourceAddress,
+      contractId,
+      method,
+      args,
+    });
+    return prepared.transaction;
+  }
+
+  async prepareContractCall(
+    input: PrepareContractCallInput,
+  ): Promise<PreparedContractCall> {
+    const { sourceAddress, contractId, method } = input;
+    const scVals = (input.args ?? []).map((arg) => nativeToScVal(arg));
     const tx = await this.buildRawInvokeTransaction(
       sourceAddress,
       contractId,
@@ -363,7 +389,42 @@ export class StellarService {
     this.logger.debug(
       `Prepared ${contractId}.${method} for ${sourceAddress} (${scVals.length} args)`,
     );
-    return prepared;
+    let retval: unknown;
+    const simulation = (
+      prepared as { simulation?: SorobanRpc.Api.SimulateTransactionResponse }
+    ).simulation;
+    if (
+      simulation &&
+      SorobanRpc.Api.isSimulationSuccess(simulation) &&
+      simulation.result
+    ) {
+      retval = scValToNative(simulation.result.retval);
+    }
+    return {
+      transaction: prepared,
+      retval,
+      authExpirationLedgers: this.extractAuthExpirationLedgers(prepared),
+    };
+  }
+
+  async getLatestLedgerSequence(): Promise<number> {
+    const response = await this.rpcServer.getLatestLedger();
+    return response.sequence;
+  }
+
+  extractAuthExpirationLedgers(transaction: Transaction): number[] {
+    const [operation] = transaction.operations;
+    if (!operation || operation.type !== 'invokeHostFunction') {
+      return [];
+    }
+    const ledgers: number[] = [];
+    for (const entry of operation.auth ?? []) {
+      const credentials = entry.credentials();
+      if (credentials.switch().name === 'sorobanCredentialsAddress') {
+        ledgers.push(credentials.address().signatureExpirationLedger());
+      }
+    }
+    return ledgers;
   }
 
   private async buildRawInvokeTransaction(
